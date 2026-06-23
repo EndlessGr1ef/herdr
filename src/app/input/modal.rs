@@ -541,7 +541,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                             let keep_auto_name = ws
                                 .tabs
                                 .get(active_tab)
-                                .is_some_and(|tab| tab.is_auto_named())
+                                .is_some_and(|tab| tab.custom_name.is_none())
                                 && ws
                                     .tab_display_name(active_tab)
                                     .is_some_and(|name| new_name == name);

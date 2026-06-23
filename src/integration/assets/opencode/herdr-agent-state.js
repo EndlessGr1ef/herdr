@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=opencode
-// HERDR_INTEGRATION_VERSION=9
+// HERDR_INTEGRATION_VERSION=10
 
 import net from "node:net";
 
@@ -44,6 +44,15 @@ const SESSION_STATE_BY_STATUS = new Map([
   ["streaming", "working"],
   ["working", "working"],
 ]);
+
+function sessionTitleFromProperties(properties) {
+  const title = properties?.info?.title;
+  return typeof title === "string" && title.trim() ? title.trim() : undefined;
+}
+
+function isDefaultSessionTitle(title) {
+  return title.startsWith("New session - ") || title.startsWith("Child session - ");
+}
 
 function stateFromSessionStatus(status) {
   const kind = typeof status === "string" ? status : status?.type;
@@ -113,6 +122,17 @@ function reportSession(sessionID, sessionStartSource) {
   return request("pane.report_agent_session", params);
 }
 
+function reportTitle(title) {
+  if (!title) {
+    return Promise.resolve();
+  }
+  return request("pane.report_metadata", { title });
+}
+
+function clearTitle() {
+  return request("pane.report_metadata", { clear_title: true });
+}
+
 function reportState(state, sessionID) {
   const params = { state };
   if (sessionID) {
@@ -142,6 +162,7 @@ export const HerdrAgentStatePlugin = async () => {
       const type = event?.type;
       const properties = event?.properties ?? {};
       const sessionID = sessionIDFromProperties(properties);
+      const title = sessionTitleFromProperties(properties);
 
       const info = properties.info;
       if (info?.id && info.parentID) {
@@ -165,6 +186,11 @@ export const HerdrAgentStatePlugin = async () => {
         case "session.updated":
           if (sessionID && sessionID !== reportedRootSessionID) {
             await reportSession(sessionID);
+          }
+          if (title && !isDefaultSessionTitle(title)) {
+            await reportTitle(title);
+          } else {
+            await clearTitle();
           }
           break;
         case "session.status": {

@@ -37,6 +37,12 @@ enum SplitCommand<'a> {
 
 pub struct Tab {
     pub custom_name: Option<String>,
+    /// Agent-derived automatic tab name (e.g. opencode session title).
+    /// Lower priority than `custom_name`; cleared when the agent releases.
+    pub auto_agent_name: Option<String>,
+    /// Which pane reported the `auto_agent_name`. Only that pane's exit
+    /// clears the auto name; other panes dying must not clobber it.
+    pub auto_agent_name_source: Option<crate::layout::PaneId>,
     pub number: usize,
     /// Identity source for this tab's pane tree.
     pub root_pane: PaneId,
@@ -181,6 +187,8 @@ impl Tab {
         Ok((
             Self {
                 custom_name: None,
+                auto_agent_name: None,
+                auto_agent_name_source: None,
                 number,
                 root_pane: root_id,
                 layout,
@@ -198,11 +206,20 @@ impl Tab {
     }
 
     pub fn is_auto_named(&self) -> bool {
-        self.custom_name.is_none()
+        self.custom_name.is_none() && self.auto_agent_name.is_none()
     }
 
     pub fn set_custom_name(&mut self, name: String) {
         self.custom_name = Some(name);
+    }
+
+    pub fn set_auto_agent_name(&mut self, name: Option<String>) {
+        self.auto_agent_name = name;
+    }
+
+    pub fn clear_auto_agent_name(&mut self) {
+        self.auto_agent_name = None;
+        self.auto_agent_name_source = None;
     }
 
     #[cfg(test)]
@@ -474,6 +491,8 @@ impl Tab {
         panes.insert(pane_id, moved.pane_state);
         Self {
             custom_name,
+            auto_agent_name: None,
+            auto_agent_name_source: None,
             number,
             root_pane: pane_id,
             layout: TileLayout::from_saved(Node::Pane(pane_id), pane_id),
@@ -498,6 +517,11 @@ impl Tab {
             if let Some(next_root) = next_root {
                 self.root_pane = next_root;
             }
+        }
+
+        // If the moved pane was the source of the auto agent name, clear it.
+        if self.auto_agent_name_source == Some(pane_id) {
+            self.clear_auto_agent_name();
         }
 
         let pane_state = self.panes.remove(&pane_id)?;

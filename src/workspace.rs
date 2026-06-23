@@ -490,6 +490,7 @@ impl Workspace {
         Some(
             tab.custom_name
                 .clone()
+                .or_else(|| tab.auto_agent_name.clone())
                 .unwrap_or_else(|| (tab_idx + 1).to_string()),
         )
     }
@@ -1263,6 +1264,8 @@ impl Workspace {
         panes.insert(root_id, PaneState::new(terminal_id));
         let tab = Tab {
             custom_name: None,
+            auto_agent_name: None,
+            auto_agent_name_source: None,
             number: 1,
             root_pane: root_id,
             layout,
@@ -1319,6 +1322,8 @@ impl Workspace {
         panes.insert(root_id, PaneState::new(TerminalId::alloc()));
         let tab = Tab {
             custom_name: name.map(str::to_string),
+            auto_agent_name: None,
+            auto_agent_name_source: None,
             number: self.next_public_tab_number,
             root_pane: root_id,
             layout,
@@ -1797,5 +1802,40 @@ mod tests {
         assert_eq!(ws.tabs[2].root_pane, moved_root);
         assert_eq!(ws.tabs[ws.active_tab].root_pane, active_root);
         ws.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn tab_display_name_priority_custom_over_auto_over_index() {
+        let mut ws = Workspace::test_new("test");
+        let tab_idx = 0;
+
+        // index fallback
+        assert_eq!(ws.tab_display_name(tab_idx).as_deref(), Some("1"));
+        assert!(ws.tabs[tab_idx].is_auto_named());
+
+        // auto_agent_name takes over from index
+        ws.tabs[tab_idx].set_auto_agent_name(Some("session-title".into()));
+        assert_eq!(
+            ws.tab_display_name(tab_idx).as_deref(),
+            Some("session-title")
+        );
+        assert!(!ws.tabs[tab_idx].is_auto_named());
+
+        // custom_name wins over auto_agent_name
+        ws.tabs[tab_idx].set_custom_name("my-tab".into());
+        assert_eq!(ws.tab_display_name(tab_idx).as_deref(), Some("my-tab"));
+        assert!(!ws.tabs[tab_idx].is_auto_named());
+
+        // clearing custom_name falls back to auto_agent_name
+        ws.tabs[tab_idx].custom_name = None;
+        assert_eq!(
+            ws.tab_display_name(tab_idx).as_deref(),
+            Some("session-title")
+        );
+
+        // clearing auto_agent_name falls back to index
+        ws.tabs[tab_idx].clear_auto_agent_name();
+        assert_eq!(ws.tab_display_name(tab_idx).as_deref(), Some("1"));
+        assert!(ws.tabs[tab_idx].is_auto_named());
     }
 }

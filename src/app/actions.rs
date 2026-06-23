@@ -3066,6 +3066,52 @@ impl AppState {
         update.agent_released.then_some(update)
     }
 
+    /// Propagate an agent-reported session title to the owning tab's
+    /// `auto_agent_name`. User-set `custom_name` always wins. Returns true
+    /// if the tab name changed so callers can trigger a render.
+    pub(crate) fn apply_auto_agent_name(&mut self, pane_id: PaneId, title: Option<String>) -> bool {
+        let Some((ws_idx, tab_idx)) = self.workspace_and_tab_for_pane(pane_id) else {
+            return false;
+        };
+        let tab = &mut self.workspaces[ws_idx].tabs[tab_idx];
+        if tab.custom_name.is_some() {
+            return false;
+        }
+        // Empty or whitespace-only titles are not meaningful agent names.
+        let clean = title.filter(|t| !t.trim().is_empty());
+        if tab.auto_agent_name == clean {
+            return false;
+        }
+        tab.set_auto_agent_name(clean);
+        tab.auto_agent_name_source = Some(pane_id);
+        true
+    }
+
+    /// Clear `auto_agent_name` on the tab owning `pane_id` (e.g. when the
+    /// agent process exits). Returns true if the tab name changed.
+    pub(crate) fn clear_auto_agent_name_for_pane(&mut self, pane_id: PaneId) -> bool {
+        let Some((ws_idx, tab_idx)) = self.workspace_and_tab_for_pane(pane_id) else {
+            return false;
+        };
+        let tab = &mut self.workspaces[ws_idx].tabs[tab_idx];
+        // Only clear if the dying pane is the one that originally set the
+        // auto name. Other panes in the same tab must not clobber it.
+        if tab.auto_agent_name_source == Some(pane_id) && tab.custom_name.is_none() {
+            tab.clear_auto_agent_name();
+            return true;
+        }
+        false
+    }
+
+    fn workspace_and_tab_for_pane(&self, pane_id: PaneId) -> Option<(usize, usize)> {
+        for (ws_idx, ws) in self.workspaces.iter().enumerate() {
+            if let Some(tab_idx) = ws.find_tab_index_for_pane(pane_id) {
+                return Some((ws_idx, tab_idx));
+            }
+        }
+        None
+    }
+
     fn apply_pane_state_change(
         &mut self,
         ws_idx: usize,
@@ -6051,5 +6097,176 @@ mod tests {
         assert!(!deferred);
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "notes");
+    }
+
+    #[test]
+    fn auto_agent_name_sets_tab_title_when_no_custom_name() {
+        let mut state = app_with_workspaces(&["ws"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+
+        let changed = state.apply_auto_agent_name(pane_id, Some("Refactor auth".into()));
+        assert!(changed);
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("Refactor auth")
+        );
+    }
+
+    #[test]
+    fn auto_agent_name_does_not_override_custom_name() {
+        let mut state = app_with_workspaces(&["ws"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        state.workspaces[0].tabs[0].set_custom_name("my-tab".into());
+
+        let changed = state.apply_auto_agent_name(pane_id, Some("Refactor auth".into()));
+        assert!(!changed);
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("my-tab")
+        );
+        assert_eq!(state.workspaces[0].tabs[0].auto_agent_name.as_deref(), None);
+    }
+
+    #[test]
+    fn auto_agent_name_clears_back_to_index() {
+        let mut state = app_with_workspaces(&["ws"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+
+        state.apply_auto_agent_name(pane_id, Some("session".into()));
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("session")
+        );
+
+        let changed = state.clear_auto_agent_name_for_pane(pane_id);
+        assert!(changed);
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn auto_agent_name_update_replaces_previous() {
+        let mut state = app_with_workspaces(&["ws"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+
+        state.apply_auto_agent_name(pane_id, Some("first".into()));
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("first")
+        );
+
+        let changed = state.apply_auto_agent_name(pane_id, Some("second".into()));
+        assert!(changed);
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("second")
+        );
+    }
+
+    #[test]
+    fn auto_agent_name_no_change_returns_false() {
+        let mut state = app_with_workspaces(&["ws"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+
+        state.apply_auto_agent_name(pane_id, Some("same".into()));
+        let changed = state.apply_auto_agent_name(pane_id, Some("same".into()));
+        assert!(!changed);
+    }
+
+    #[test]
+    fn auto_agent_name_clear_when_custom_name_set_is_noop() {
+        let mut state = app_with_workspaces(&["ws"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        state.workspaces[0].tabs[0].set_custom_name("locked".into());
+
+        let changed = state.clear_auto_agent_name_for_pane(pane_id);
+        assert!(!changed);
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("locked")
+        );
+    }
+
+    #[test]
+    fn auto_agent_name_source_scoping_other_pane_does_not_clear() {
+        let mut state = app_with_workspaces(&["ws"]);
+        let pane_a = state.workspaces[0].tabs[0].root_pane;
+        let pane_b = state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+
+        state.apply_auto_agent_name(pane_a, Some("from A".into()));
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("from A")
+        );
+
+        // pane B dying does NOT clear A's title
+        let changed = state.clear_auto_agent_name_for_pane(pane_b);
+        assert!(!changed);
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("from A")
+        );
+
+        // pane A dying clears the title
+        let changed = state.clear_auto_agent_name_for_pane(pane_a);
+        assert!(changed);
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn auto_agent_name_rejects_empty_and_whitespace_titles() {
+        let mut state = app_with_workspaces(&["ws"]);
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+
+        let changed = state.apply_auto_agent_name(pane_id, Some("".into()));
+        assert!(!changed);
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("1")
+        );
+
+        let changed = state.apply_auto_agent_name(pane_id, Some("   ".into()));
+        assert!(!changed);
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("1")
+        );
+
+        // valid title still works after rejected empties
+        let changed = state.apply_auto_agent_name(pane_id, Some("valid".into()));
+        assert!(changed);
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("valid")
+        );
+    }
+
+    #[test]
+    fn auto_agent_name_cleared_on_pane_move_from_source_tab() {
+        let mut state = app_with_workspaces(&["ws"]);
+        // split to get a second pane so moving one doesn't close the tab
+        let _pane_b = state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        let pane_a = state.workspaces[0].tabs[0].root_pane;
+
+        state.apply_auto_agent_name(pane_a, Some("session".into()));
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("session")
+        );
+
+        // simulate moving pane_a out: take_pane_for_move clears auto_agent_name
+        let moved = state.workspaces[0].tabs[0].take_pane_for_move(pane_a);
+        assert!(moved.is_some());
+        assert!(state.workspaces[0].tabs[0].auto_agent_name.is_none());
+        assert_eq!(state.workspaces[0].tabs[0].auto_agent_name_source, None);
+        assert_eq!(
+            state.workspaces[0].tab_display_name(0).as_deref(),
+            Some("1")
+        );
     }
 }

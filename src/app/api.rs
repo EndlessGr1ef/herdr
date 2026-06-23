@@ -185,10 +185,12 @@ impl App {
             let previous_toast = self.state.toast.clone();
             if let Some(update) = self.state.publish_pane_process_exit_if_agent(*pane_id) {
                 self.sync_full_lifecycle_authority_detection_pauses();
+                self.maybe_auto_name_tab(&update);
                 self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
                 self.emit_pane_state_update(&update);
                 self.emit_terminal_or_system_agent_notifications(std::slice::from_ref(&update));
             }
+            self.clear_auto_agent_name_for_pane(*pane_id);
             if self.runtime_exit_action(*pane_id) == RuntimeExitAction::RespawnShell
                 && self.respawn_shell_for_launch_pane(*pane_id)
             {
@@ -270,6 +272,17 @@ impl App {
             } else {
                 None
             };
+        let metadata_title_event = if let AppEvent::HookMetadataReported {
+            pane_id,
+            title,
+            clear_title,
+            ..
+        } = &ev
+        {
+            Some((*pane_id, title.clone(), *clear_title))
+        } else {
+            None
+        };
         let terminal_cwd_reported = matches!(ev, AppEvent::TerminalCwdReported { .. });
         let previous_toast = self.state.toast.clone();
         let pane_updates = self.state.handle_app_event(ev);
@@ -296,8 +309,20 @@ impl App {
             self.render_notify.notify_one();
         }
         for update in &pane_updates {
+            self.maybe_auto_name_tab(update);
             self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
             self.emit_pane_state_update(update);
+        }
+        if let Some((pane_id, title, clear_title)) = metadata_title_event {
+            let changed = if clear_title {
+                self.state.clear_auto_agent_name_for_pane(pane_id)
+            } else {
+                self.state.apply_auto_agent_name(pane_id, title)
+            };
+            if changed {
+                self.render_dirty.request_generic();
+                self.render_notify.notify_one();
+            }
         }
         self.sync_agent_metadata_deadline();
         if let Some((
@@ -362,6 +387,28 @@ impl App {
     fn reset_all_agent_detection_runtimes(&self) {
         for runtime in self.terminal_runtimes.values() {
             runtime.reset_agent_detection();
+        }
+    }
+
+    /// When an agent reports a session title via `pane.report_metadata`,
+    /// propagate it to the owning tab's `auto_agent_name` so the tab bar
+    /// reflects the active session. User-set `custom_name` always wins.
+    fn maybe_auto_name_tab(&mut self, update: &crate::app::actions::PaneStateUpdate) {
+        if self
+            .state
+            .apply_auto_agent_name(update.pane_id, update.presentation.title.clone())
+        {
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
+        }
+    }
+
+    /// Clear `auto_agent_name` on the tab owning `pane_id` when the agent
+    /// process exits, so the tab bar falls back to the numeric label.
+    fn clear_auto_agent_name_for_pane(&mut self, pane_id: crate::layout::PaneId) {
+        if self.state.clear_auto_agent_name_for_pane(pane_id) {
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
         }
     }
 
