@@ -54,6 +54,13 @@ function isDefaultSessionTitle(title) {
   return title.startsWith("New session - ") || title.startsWith("Child session - ");
 }
 
+// opencode subagent (child) sessions have `parentID` set; root sessions do not.
+// Only the root session should drive the tab name — subagent titles must not
+// overwrite it.
+function isSubagentSession(properties) {
+  return properties?.info?.parentID !== undefined;
+}
+
 function stateFromSessionStatus(status) {
   const kind = typeof status === "string" ? status : status?.type;
   return typeof kind === "string"
@@ -186,6 +193,10 @@ export const HerdrAgentStatePlugin = async () => {
         case "session.updated":
           if (sessionID && sessionID !== reportedRootSessionID) {
             await reportSession(sessionID);
+          }
+          if (isSubagentSession(properties)) {
+            // subagent session — do not rename the tab
+            break;
           }
           if (title && !isDefaultSessionTitle(title)) {
             await reportTitle(title);
