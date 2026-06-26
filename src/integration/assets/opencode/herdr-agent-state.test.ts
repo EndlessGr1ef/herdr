@@ -91,27 +91,30 @@ test("serializes lifecycle reports", async () => {
   expect(sequences[1]).toBe((sequences[0] as number) + 1);
 });
 
-test("suppresses redundant same-session updates", async () => {
+test("suppresses redundant and broadcast session.updated events", async () => {
   const plugin = await loadPlugin();
 
+  // session.status reports state for the root session.
   await plugin.event({
     event: {
       type: "session.status",
       properties: { sessionID: "root-session", status: { type: "busy" } },
     },
   });
+  // A session.updated for the same session is suppressed.
   await plugin.event({
     event: { type: "session.updated", properties: { sessionID: "root-session" } },
   });
+  // A broadcast session.updated for a different session is also suppressed —
+  // opencode emits these for ALL sessions in the directory, so adopting would
+  // clobber the tab name with a previous session's title. Only session.created
+  // establishes a new root session.
   await plugin.event({
     event: { type: "session.updated", properties: { sessionID: "replacement-session" } },
   });
 
-  expect(requests.map(requestMethod)).toEqual([
-    "pane.report_agent",
-    "pane.report_agent_session",
-  ]);
-  expect(requests.map(requestSessionID)).toEqual(["root-session", "replacement-session"]);
+  expect(requests.map(requestMethod)).toEqual(["pane.report_agent"]);
+  expect(requests.map(requestSessionID)).toEqual(["root-session"]);
 });
 
 test("reports retry status as working", async () => {

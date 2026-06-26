@@ -158,6 +158,12 @@ export const HerdrAgentStatePlugin = async () => {
     return {};
   }
 
+  // Track the current root session for this opencode process. The plugin
+  // receives session.updated events for ALL sessions in the same directory
+  // (not just the current one), so we must filter to avoid forwarding a
+  // previous session's title to herdr and clobbering the tab name.
+  let currentRootSessionID = undefined;
+
   return {
     "chat.message": async ({ sessionID }) => {
       if (sessionID && childSessions.has(sessionID)) {
@@ -185,18 +191,28 @@ export const HerdrAgentStatePlugin = async () => {
 
       switch (type) {
         case "session.created":
-          // A root session.created is a genuine new-session start (subagent
-          // creates are dropped above). Signal it so herdr replaces the pane's
-          // prior session id instead of treating the change as cross-talk.
-          await reportSession(sessionID, "new");
-          break;
         case "session.updated":
-          if (sessionID && sessionID !== reportedRootSessionID) {
-            await reportSession(sessionID);
-          }
           if (isSubagentSession(properties)) {
-            // subagent session — do not rename the tab
+            // subagent session — report for lifecycle tracking, do not rename
+            await reportSession(sessionID);
             break;
+          }
+          // Only session.created establishes the current root session.
+          // session.updated must NOT adopt — opencode broadcasts
+          // session.updated for ALL sessions in the directory, so adopting
+          // from it would pick up a previous session's title.
+          if (type === "session.created") {
+            currentRootSessionID = sessionID;
+            // A root session.created is a genuine new-session start (subagent
+            // creates are dropped above). Signal it so herdr replaces the pane's
+            // prior session id instead of treating the change as cross-talk.
+            await reportSession(sessionID, "new");
+          } else {
+            // Only report + forward title for the current root session.
+            if (sessionID !== currentRootSessionID) {
+              break;
+            }
+            await reportSession(sessionID);
           }
           if (title && !isDefaultSessionTitle(title)) {
             await reportTitle(title);
@@ -230,6 +246,9 @@ export const HerdrAgentStatePlugin = async () => {
           await reportState("idle", sessionID);
           break;
         case "session.deleted":
+          if (sessionID === currentRootSessionID) {
+            currentRootSessionID = undefined;
+          }
           break;
         default:
           break;

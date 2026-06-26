@@ -466,6 +466,11 @@ fn restore_tab(
     let mut terminals = Vec::new();
     let mut terminal_runtimes = HashMap::new();
     let mut failed_imports = 0;
+    // Track whether any pane in this tab has a live/resumable agent. If not
+    // (fresh spawn), the restored `auto_agent_name` is stale — the new session
+    // will report its own title. Drop it to avoid showing the previous
+    // session's name until the new one reports.
+    let mut tab_has_resume_or_handoff = false;
     for id in &pane_ids {
         let old_id = reverse_id_map.get(id);
         let saved_pane = old_id.and_then(|old_id| snap.panes.get(old_id));
@@ -533,6 +538,9 @@ fn restore_tab(
         } else {
             startup.restore_plan.clone()
         };
+        if pending_native_agent_restore.is_some() || was_imported {
+            tab_has_resume_or_handoff = true;
+        }
         if let Some(plan) = pending_native_agent_restore {
             let terminal_id = TerminalId::alloc();
             let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone())
@@ -717,7 +725,11 @@ fn restore_tab(
         Some((
             crate::workspace::Tab {
                 custom_name: snap.custom_name.clone(),
-                auto_agent_name: snap.auto_agent_name.clone(),
+                auto_agent_name: if tab_has_resume_or_handoff {
+                    snap.auto_agent_name.clone()
+                } else {
+                    None
+                },
                 auto_agent_name_source: None,
                 number,
                 root_pane,
@@ -1729,5 +1741,141 @@ mod tests {
             collapsed_space_keys: Default::default(),
         };
         (snapshot, history)
+    }
+
+    #[tokio::test]
+    async fn restore_drops_stale_auto_agent_name_for_fresh_spawn() {
+        let cwd = std::env::current_dir().unwrap();
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("workspace".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                worktree_space: None,
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 0,
+                public_tab_numbers: Vec::new(),
+                next_public_tab_number: 0,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    auto_agent_name: Some("stale previous session".into()),
+                    layout: LayoutSnapshot::Pane(0),
+                    panes: HashMap::from([(
+                        0,
+                        super::super::snapshot::PaneSnapshot {
+                            cwd,
+                            label: None,
+                            agent_name: None,
+                            agent_session: None,
+                            launch_argv: None,
+                        },
+                    )]),
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+        };
+        let (events, _event_rx) = mpsc::channel(4);
+
+        let (workspaces, _terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        // Fresh spawn (no resume, no handoff) must drop the stale
+        // auto_agent_name — otherwise the tab shows the previous session's
+        // name until the new session reports a title.
+        assert_eq!(
+            workspaces[0].tabs[0].auto_agent_name, None,
+            "fresh-spawn tab must not inherit stale auto_agent_name from snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_preserves_auto_agent_name_for_native_agent_resume() {
+        let cwd = std::env::current_dir().unwrap();
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("workspace".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                worktree_space: None,
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 0,
+                public_tab_numbers: Vec::new(),
+                next_public_tab_number: 0,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    auto_agent_name: Some("codex session".into()),
+                    layout: LayoutSnapshot::Pane(0),
+                    panes: HashMap::from([(
+                        0,
+                        super::super::snapshot::PaneSnapshot {
+                            cwd,
+                            label: None,
+                            agent_name: None,
+                            agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
+                                source: "herdr:codex".into(),
+                                agent: "codex".into(),
+                                kind: crate::agent_resume::AgentSessionRefKind::Id,
+                                value: "codex-session".into(),
+                            }),
+                            launch_argv: None,
+                        },
+                    )]),
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+        };
+        let (events, _event_rx) = mpsc::channel(4);
+
+        let (workspaces, _terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            true,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        // Native agent resume (Path A) preserves the auto_agent_name — the
+        // resumed agent process will re-fire session.created and overwrite it,
+        // but until then the tab should show the restored title, not be blank.
+        assert_eq!(
+            workspaces[0].tabs[0].auto_agent_name.as_deref(),
+            Some("codex session"),
+            "native-resume tab must preserve auto_agent_name until the agent re-reports"
+        );
     }
 }
