@@ -91,30 +91,52 @@ test("serializes lifecycle reports", async () => {
   expect(sequences[1]).toBe((sequences[0] as number) + 1);
 });
 
-test("suppresses redundant and broadcast session.updated events", async () => {
+test("reports title from session.updated on continue — first event adopts root session", async () => {
   const plugin = await loadPlugin();
 
-  // session.status reports state for the root session.
+  // When continuing an existing session (no session.created), the first
+  // non-subagent session.updated with a sessionID should adopt it as the
+  // current root session and forward its non-default title.
   await plugin.event({
     event: {
-      type: "session.status",
-      properties: { sessionID: "root-session", status: { type: "busy" } },
+      type: "session.updated",
+      properties: { sessionID: "continued-session", info: { title: "My Project Work" } },
     },
   });
-  // A session.updated for the same session is suppressed.
+
+  expect(requests.map(requestMethod)).toEqual([
+    "pane.report_agent_session",
+    "pane.report_metadata",
+  ]);
+  expect(requests.map(requestSessionID)).toEqual(["continued-session", undefined]);
+  expect(requests.map((r) => requestParam(r, "title"))).toEqual([undefined, "My Project Work"]);
+});
+
+test("suppresses broadcast session.updated for different session after root is established", async () => {
+  const plugin = await loadPlugin();
+
+  // Establish root via session.created (new session flow).
   await plugin.event({
-    event: { type: "session.updated", properties: { sessionID: "root-session" } },
+    event: { type: "session.created", properties: { sessionID: "root-session", info: { title: "Root Session" } } },
   });
-  // A broadcast session.updated for a different session is also suppressed —
-  // opencode emits these for ALL sessions in the directory, so adopting would
-  // clobber the tab name with a previous session's title. Only session.created
-  // establishes a new root session.
+  requests.length = 0; // discard establishment requests
+
+  // A session.updated for the root is forwarded.
   await plugin.event({
-    event: { type: "session.updated", properties: { sessionID: "replacement-session" } },
+    event: { type: "session.updated", properties: { sessionID: "root-session", info: { title: "Root Session" } } },
   });
 
-  expect(requests.map(requestMethod)).toEqual(["pane.report_agent"]);
-  expect(requests.map(requestSessionID)).toEqual(["root-session"]);
+  // A broadcast session.updated for a different session is suppressed —
+  // opencode emits these for ALL sessions in the directory, so adopting would
+  // clobber the tab name with a previous session's title.
+  await plugin.event({
+    event: { type: "session.updated", properties: { sessionID: "replacement-session", info: { title: "Replacement" } } },
+  });
+
+  // Only the root session update should produce output.
+  expect(requests.map(requestMethod)).toEqual(["pane.report_agent_session", "pane.report_metadata"]);
+  expect(requests.map(requestSessionID)).toEqual(["root-session", undefined]);
+  expect(requests.map((r) => requestParam(r, "title"))).toEqual([undefined, "Root Session"]);
 });
 
 test("reports retry status as working", async () => {

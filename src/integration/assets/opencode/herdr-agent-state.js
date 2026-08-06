@@ -197,16 +197,26 @@ export const HerdrAgentStatePlugin = async () => {
             await reportSession(sessionID);
             break;
           }
-          // Only session.created establishes the current root session.
-          // session.updated must NOT adopt — opencode broadcasts
-          // session.updated for ALL sessions in the directory, so adopting
-          // from it would pick up a previous session's title.
+          // session.created establishes the current root session.
+          // session.updated must NOT adopt from arbitrary sessions — opencode
+          // broadcasts session.updated for ALL sessions in the directory, so
+          // adopting from it would pick up a previous session's title.
+          // However, when continuing an existing session, opencode never
+          // sends session.created for that session. In that case the first
+          // non-subagent session.updated that arrives (currentRootSessionID
+          // is still undefined) IS the current process's session, so we adopt
+          // it and forward its title.
           if (type === "session.created") {
             currentRootSessionID = sessionID;
             // A root session.created is a genuine new-session start (subagent
             // creates are dropped above). Signal it so herdr replaces the pane's
             // prior session id instead of treating the change as cross-talk.
             await reportSession(sessionID, "new");
+          } else if (!currentRootSessionID) {
+            // First session.updated after opencode --continue: adopt this as
+            // the current root session so its title reaches herdr.
+            currentRootSessionID = sessionID;
+            await reportSession(sessionID);
           } else {
             // Only report + forward title for the current root session.
             if (sessionID !== currentRootSessionID) {
